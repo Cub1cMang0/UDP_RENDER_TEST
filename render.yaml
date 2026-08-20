@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: qurl-hub-reachability-test
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    # No real HTTP purpose — the entrypoint binds a throwaway responder
+    # on $PORT purely so Render's free-tier Web Service type (the only
+    # type free plans support) doesn't cycle the container as unhealthy
+    # while the actual test (the connector process) runs alongside it.
+    envVars:
+      - key: QURL_API_KEY
+        sync: false          # set manually in the Render dashboard — never commit this
+      - key: QURL_ENDPOINT
+        value: https://api.layerv.xyz
+      - key: CONNECTOR_ID
+        value: g1-render-hub-test
+      - key: TARGET
+        value: "127.0.0.1:8080"
+      # Defaulting to the sandbox value from the internal alpha notes.
+      # CONFIRM with Ben before treating a failure as conclusive —
+      # the public qurl-go README lists a different host/port
+      # (hub.nhp.layerv.ai:62206) for its generic example.
+      - key: QURL_CONNECTOR_HUB_HOST
+        value: hub.nhp.layerv.xyz
+      - key: QURL_CONNECTOR_HUB_PORT
+        value: "443"
+      - key: QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64
+        value: "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="

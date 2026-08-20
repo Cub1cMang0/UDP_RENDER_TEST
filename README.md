@@ -1,47 +1,75 @@
-# Render Outbound UDP Test
+# Render Hub Reachability Test (Background Worker)
 
-Confirms — rather than assumes — whether Render allows outbound UDP,
-which both the Go-library and sidecar qURL paths require (per the
-qurl-go README: native registration runs over "authenticated NHP UDP",
-no HTTP fallback).
+Reuses the exact `qurl connector run` binary already validated locally
+against sandbox — this time deployed on Render itself, to get a real
+answer instead of inferring one from a generic NTP probe.
 
-## What it does
-Hits three independent public NTP servers (Cloudflare, Google, and the
-pool.ntp.org rotation) over raw UDP and waits for a real reply. Success
-on any of them proves outbound UDP genuinely leaves and returns to the
-platform. Failure on all three is strong evidence of a platform-level
-block, since NTP over UDP/123 is about as universally permitted as
-outbound UDP traffic gets — if this fails everywhere, qURL's NHP UDP
-almost certainly will too.
+## Why a Web Service, not a Background Worker
+Background Workers are the more natural fit for a process that doesn't
+serve HTTP — but **Render's free tier doesn't support the Background
+Worker service type at all** (confirmed via a failed blueprint sync:
+"service type is not available for this plan"). That's a real platform
+limit, not a config mistake — worth logging alongside the disk-
+persistence finding.
 
-## Deploy to Render
-1. Push this folder to a repo (or a new one) Render can see.
-2. In the Render dashboard: **New > Web Service** → connect the repo.
-3. Runtime: **Go** (native runtime, no Dockerfile needed).
-   - Build command: `go build -o app .`
-   - Start command: `./app`
-4. Deploy. Once live, hit:
-   ```
-   curl https://<your-service>.onrender.com/test-udp
-   ```
+The workaround: deploy as a free-tier Web Service (which free plans do
+support), and have the entrypoint bind a throwaway `python3 -m
+http.server` on `$PORT` purely to satisfy Render's health check,
+running in parallel with the actual `qurl connector run` process. The
+HTTP responder has nothing to do with the test itself — it's scaffolding
+to keep Render from cycling the container as unhealthy mid-test.
+
+## Before deploying
+Confirm the Hub host/port with Ben. Two different values exist in
+what you've been given:
+- `hub.nhp.layerv.xyz:443` — from the internal alpha release notes,
+  explicitly marked sandbox. **This is the default in render.yaml.**
+- `hub.nhp.layerv.ai:62206` — from the public `qurl-go` README's
+  generic quickstart example.
+
+If they're actually the same target under different naming, fine —
+but don't let this test report "UDP blocked" when the real issue is
+"wrong address." Swap `QURL_CONNECTOR_HUB_HOST` / `_PORT` in the
+Render dashboard env vars if Ben says otherwise.
+
+## Deploy
+1. Push this folder to a repo Render can see.
+2. In Render: **New > Blueprint**, point it at the repo — `render.yaml`
+   will configure the Background Worker automatically.
+3. Set `QURL_API_KEY` manually in the dashboard (it's marked `sync: false`
+   in the manifest on purpose, so it's never committed).
+4. Deploy, then watch the **Logs** tab.
 
 ## Reading the result
-```json
-{
-  "any_server_reachable_via_udp": true/false,
-  "results": [ ... per-server detail ... ]
-}
-```
-- **`true`** — outbound UDP works on Render. Worth one follow-up test
-  directly against the qURL sandbox Hub (`hub.nhp.layerv.xyz` per the
-  alpha CLI config) before fully committing, since a permissive NTP
-  path doesn't guarantee every UDP port/destination is open.
-- **`false` across all three** — treat as a real platform block. That
-  settles the Render question independent of which qURL integration
-  path (sidecar vs. embedded Go library) you pick, since both need the
-  same NHP UDP transport.
 
-## Note on timeouts
-Each server gets a 5s dial+read timeout, so the whole `/test-udp` call
-resolves in ~15s worst case — comfortably inside Render's request
-timeout, so no need to raise any platform timeout setting for this test.
+**Pass** — look for this sequence, same as your local test:
+```
+connector: native registration succeeded   event=native_registration_succeeded
+connector: NHP knock ok                    event=knock_ok
+connector: tunnel login admitted           event=login_success
+```
+If you see `login_success`, outbound UDP to the real Hub works. That's
+the conclusive answer — stronger than the NTP result, since it's the
+actual protocol and actual endpoint, not a proxy for it.
+
+**Fail — and the important part is distinguishing *why*:**
+- **Hang / timeout with no `knock_ok`, no error message** → the
+  strongest signal of a genuine UDP block. The knock packet went out
+  and nothing came back.
+- **Immediate connection error, DNS failure, or "no route to host"** →
+  likely a wrong host/port, not a UDP block. Re-check the Hub values
+  with Ben before concluding anything about Render's network.
+- **`RESULT: INCONCLUSIVE — token mint failed`** → an auth/API-key
+  problem, unrelated to UDP entirely. Check `QURL_API_KEY` and
+  `QURL_ENDPOINT`.
+
+Only the first case is real evidence against Render. The other two are
+configuration issues that happen to look similar if you're only
+skimming for "did it work."
+
+## After this test
+Whatever the result, this doesn't block moving on to the custom
+`AgentStateStore` question — that's a separate, parallel track. A
+`worker` service on Render's free tier doesn't need to stay running
+indefinitely for this specific test either; it's fine to delete it
+once you have your answer.
